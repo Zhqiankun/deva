@@ -6,8 +6,9 @@
 #  - 本地 git tag v<version> && git push origin v<version>：CI 建成草稿 Release，检查 / 改写说明后再点
 #    「Publish release」；发布前对外不可见。（网页上「Save draft」不会建 tag，触发不了 CI，所以要先审再发只能走这条。）
 # 本地预览版本说明：node .github/scripts/release-notes.mjs v<version> HEAD
-# 只想试打包（比如改了打包配置）：在 Actions 页选 Release →「Run workflow」，各平台的包作为 artifact 留在本次运行里，
-# 不建 Release、不校验版本。
+# 只想试打包（比如改了打包配置）：在 Actions 页选 Release →「Run workflow」并选择分支，
+# 各平台的包作为 artifact 留在本次运行里，不建 Release、不校验版本。
+# tag 推送未自动触发时，可手动运行同一个 v* tag：仍校验版本，并在 GitHub 端上传草稿 Release。
 name: Release
 
 on:
@@ -53,7 +54,7 @@ jobs:
           cache: pnpm
 
       - name: 校验 tag 与 package.json 版本一致
-        if: github.event_name == 'push'
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: bash
         run: |
           PKG_VERSION=$(node -p "require('./apps/desktop/package.json').version")
@@ -87,8 +88,8 @@ jobs:
 
   release:
     needs: build
-    # 手动「Run workflow」只试打包，不发版
-    if: github.event_name == 'push'
+    # tag 自动或手动运行都上传草稿；分支上的手动运行仅试打包。
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
