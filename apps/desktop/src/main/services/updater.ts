@@ -1,7 +1,8 @@
 /**
  * 检查更新（设置 → 关于 →「检查更新」）。只在用户点按钮时检查，不在后台自动检查。
  *
- * 检查：读 GitHub 的 releases/latest（预发布版这个接口本就不返回），和本机版本比较。
+ * 检查：Windows 安装版由 electron-updater 读取公开发布页和 latest.yml，避免匿名 REST API 限流；
+ * 其他安装方式读取 GitHub releases/latest API。仅提示正式版，并和本机版本比较。
  * 有新版时按安装方式分两种（见 shared/update.ts 的 UpdateMode）：
  *  - Windows 上用 exe 装的：electron-updater 读 Release 里的 latest.yml，应用内下载（校验 sha512），
  *    点「重启并安装」后静默覆盖安装并自动重开；下好了没点，下次退出时也会装上；
@@ -12,11 +13,11 @@
  */
 import { app, ipcMain, net, shell, type BrowserWindow } from 'electron'
 import { autoUpdater, type AppUpdater } from 'electron-updater'
-import type { UpdateMode, UpdateRelease, UpdateState } from '../../shared/update'
+import { RELEASES_URL, type UpdateMode, type UpdateRelease, type UpdateState } from '../../shared/update'
 import { settleActiveTurns } from './chat'
 import { installedByNsis, isPortable } from './portable'
 
-const LATEST_API = 'https://api.github.com/repos/sqfcyily/deva/releases/latest'
+const LATEST_API = 'https://api.github.com/repos/Zhqiankun/deva/releases/latest'
 
 interface GithubAsset {
   name: string
@@ -35,7 +36,7 @@ let getWindow: () => BrowserWindow | null = () => null
 let state: UpdateState = { phase: 'idle' }
 /** 最近一次查到的新版；下载失败后「重试」直接用它，不用重新检查。 */
 let found: { release: UpdateRelease; mode: UpdateMode; installerUrl: string | null } | null = null
-/** 首次下载时才配置（也就只有 Windows exe 安装的会用到）。 */
+/** 首次检查或下载时配置，仅 Windows exe 安装版使用。 */
 let updater: AppUpdater | null = null
 
 function setState(next: UpdateState): void {
@@ -107,6 +108,22 @@ async function check(): Promise<void> {
     return
   setState({ phase: 'checking' })
   try {
+    if (canAutoInstall()) {
+      const result = await getUpdater().checkForUpdates()
+      if (!result) throw new Error('Updater is not active')
+      const version = result.updateInfo.version
+      const name = installerName(version)
+      const ready = result.updateInfo.files.some((file) => file.url === name)
+      if (compareVersions(version, app.getVersion()) <= 0 || !ready) {
+        found = null
+        setState({ phase: 'latest' })
+        return
+      }
+      const release = { version, pageUrl: `${RELEASES_URL}/tag/v${version}` }
+      found = { release, mode: 'auto', installerUrl: null }
+      setState({ phase: 'available', release, mode: 'auto', file: name })
+      return
+    }
     const res = await net.fetch(LATEST_API, {
       headers: { accept: 'application/vnd.github+json' },
       signal: AbortSignal.timeout(15_000)
@@ -119,15 +136,13 @@ async function check(): Promise<void> {
       setState({ phase: 'latest' })
       return
     }
-    const mode: UpdateMode = canAutoInstall() ? 'auto' : isPortable() ? 'portable' : 'manual'
+    const mode: UpdateMode = isPortable() ? 'portable' : 'manual'
     // 发版时常是先在网页上发布 Release、CI 几分钟后才把安装包传上来：本机要用的文件传完之前不算有新版，
-    // 免得用户点了下载却下不到（Windows 自动更新还要 latest.yml）
+    // 免得用户点了下载却下不到
     const uploaded = (data.assets ?? []).filter((a) => a.state !== 'open')
     const name = installerName(version)
     const installer = name ? uploaded.find((a) => a.name === name) : undefined
-    const ready =
-      name === null ||
-      (installer !== undefined && (mode !== 'auto' || uploaded.some((a) => a.name === 'latest.yml')))
+    const ready = name === null || installer !== undefined
     if (!ready) {
       found = null
       setState({ phase: 'latest' })
